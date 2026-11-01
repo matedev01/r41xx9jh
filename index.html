@@ -115,8 +115,17 @@ async function openBox(buf,p){
   const st=new Blob([pt]).stream().pipeThrough(new DecompressionStream("gzip"));
   return JSON.parse(await new Response(st).text());
 }
-const rawBase=(()=>{const m=location.host.match(/^([^.]+)\.github\.io$/),p=location.pathname.split("/").filter(Boolean)[0];return m&&p?`https://raw.githubusercontent.com/${m[1]}/${p}/data/`:"";})();
-const getBin=async n=>{const r=await fetch(rawBase+n+"?t="+Date.now(),{cache:"no-store"});if(!r.ok)throw new Error("fetch "+r.status);return r.arrayBuffer();};
+const home=(()=>{const m=location.host.match(/^([^.]+)\.github\.io$/),p=location.pathname.split("/").filter(Boolean)[0];return m&&p?m[1]+"/"+p:"";})();
+async function latest(){
+  if(!home)return"";
+  try{const r=await fetch(`https://api.github.com/repos/${home}/commits/data`,{headers:{Accept:"application/vnd.github.sha"},cache:"no-store"});if(r.ok)return(await r.text()).trim();}catch(e){}
+  return"data";
+}
+const getBin=async n=>{
+  const ref=await latest();
+  const url=ref?`https://raw.githubusercontent.com/${home}/${ref}/${n}`:n+"?t="+Date.now();
+  const r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error("fetch "+r.status);return r.arrayBuffer();
+};
 
 function gate(msg){
   app.textContent="";
