@@ -115,7 +115,8 @@ async function openBox(buf,p){
   const st=new Blob([pt]).stream().pipeThrough(new DecompressionStream("gzip"));
   return JSON.parse(await new Response(st).text());
 }
-const getBin=async n=>{const r=await fetch(n+"?t="+Date.now(),{cache:"no-store"});if(!r.ok)throw new Error("fetch "+r.status);return r.arrayBuffer();};
+const rawBase=(()=>{const m=location.host.match(/^([^.]+)\.github\.io$/),p=location.pathname.split("/").filter(Boolean)[0];return m&&p?`https://raw.githubusercontent.com/${m[1]}/${p}/data/`:"";})();
+const getBin=async n=>{const r=await fetch(rawBase+n+"?t="+Date.now(),{cache:"no-store"});if(!r.ok)throw new Error("fetch "+r.status);return r.arrayBuffer();};
 
 function gate(msg){
   app.textContent="";
@@ -444,7 +445,7 @@ function md(text){
   const p=fromHash||store.get("bk");
   if(p){try{await unlock(p,true);}catch(e){store.del("bk");gate(fromHash?"That key does not open it.":"");}}
   else gate();
-  setInterval(refresh,300000);
+  setInterval(refresh,120000);
   setInterval(header,60000);
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh();});
 })();
