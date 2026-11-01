@@ -116,16 +116,23 @@ async function openBox(buf,p){
   return JSON.parse(await new Response(st).text());
 }
 const home=(()=>{const m=location.host.match(/^([^.]+)\.github\.io$/),p=location.pathname.split("/").filter(Boolean)[0];return m&&p?m[1]+"/"+p:"";})();
+let lastEtag="",lastRef="",loadedRef="";
 async function latest(){
   if(!home)return"";
-  try{const r=await fetch(`https://api.github.com/repos/${home}/commits/data`,{headers:{Accept:"application/vnd.github.sha"},cache:"no-store"});if(r.ok)return(await r.text()).trim();}catch(e){}
+  try{
+    const headers={Accept:"application/vnd.github.sha"};
+    if(lastEtag)headers["If-None-Match"]=lastEtag;
+    const r=await fetch(`https://api.github.com/repos/${home}/commits/data`,{headers,cache:"no-store"});
+    if(r.status===304&&lastRef)return lastRef;
+    if(r.ok){lastEtag=r.headers.get("ETag")||"";lastRef=(await r.text()).trim();return lastRef;}
+  }catch(e){}
   return"data";
 }
-const getBin=async n=>{
-  const ref=await latest();
+const fetchBin=async(n,ref)=>{
   const url=ref?`https://raw.githubusercontent.com/${home}/${ref}/${n}`:n+"?t="+Date.now();
   const r=await fetch(url,{cache:"no-store"});if(!r.ok)throw new Error("fetch "+r.status);return r.arrayBuffer();
 };
+const getBin=async n=>fetchBin(n,await latest());
 
 function gate(msg){
   app.textContent="";
@@ -137,19 +144,52 @@ function gate(msg){
   inp.focus();
 }
 async function unlock(p,remember){
-  const buf=await getBin("d.bin");
+  const ref=await latest();
+  const buf=await fetchBin("d.bin",ref);
   const d=await openBox(buf,p);
-  pass=p;data=d;docs=null;stamp=new Uint8Array(buf).slice(0,28).join();
+  pass=p;data=d;docs=null;loadedRef=ref;stamp=new Uint8Array(buf).slice(0,28).join();
   if(remember)store.set("bk",p);
+  noteNew(true);
   render();
 }
 async function refresh(){
   if(!pass)return;
   try{
-    const buf=await getBin("d.bin"),st=new Uint8Array(buf).slice(0,28).join();
-    if(st!==stamp){data=await openBox(buf,pass);stamp=st;docs=null;const y=scrollY;render();scrollTo(0,y);}
+    const ref=await latest();
+    if(ref&&ref!=="data"&&ref===loadedRef){header();return;}
+    const buf=await fetchBin("d.bin",ref),st=new Uint8Array(buf).slice(0,28).join();
+    loadedRef=ref;
+    if(st!==stamp){data=await openBox(buf,pass);stamp=st;docs=null;noteNew(false);const y=scrollY;render();scrollTo(0,y);}
     else header();
   }catch(e){}
+}
+
+// new updates: unread count on the tab and in the title, and a system notification if allowed
+let swReg=null;
+const maxId=()=>{const e=data&&data.events||[];return e.length?e[e.length-1].id:0;};
+const unread=()=>{const seen=+store.get("be")||0;return(data&&data.events||[]).filter(e=>e.id>seen).length;};
+function markSeen(){store.set("be",String(maxId()));}
+function noteNew(first){
+  const told=+store.get("bo")||0,list=(data.events||[]).filter(e=>e.id>told);
+  store.set("bo",String(maxId()));
+  if(first||!list.length||!("Notification"in window)||Notification.permission!=="granted")return;
+  const last=list[list.length-1],title=list.length===1?last.kind:list.length+" new updates";
+  const o={body:list.slice(-4).map(e=>e.text).join("\n"),tag:"u"+last.id};
+  if(swReg&&swReg.showNotification)swReg.showNotification(title,o);else{try{new Notification(title,o);}catch(e){}}
+}
+async function setupAlerts(btn){
+  if(!("Notification"in window)){btn.textContent="Alerts not available here";return;}
+  const p=await Notification.requestPermission();
+  paintAlert(btn);
+  if(p==="granted"){
+    if("serviceWorker"in navigator&&!swReg){try{swReg=await navigator.serviceWorker.register("sw.js");}catch(e){}}
+    const o={body:"Alerts are on for this browser while the page is open.",tag:"on"};
+    if(swReg&&swReg.showNotification)swReg.showNotification("Board",o);else{try{new Notification("Board",o);}catch(e){}}
+  }
+}
+function paintAlert(btn){
+  const st="Notification"in window?Notification.permission:"none";
+  btn.textContent=st==="granted"?"Alerts on":st==="denied"?"Alerts blocked":st==="none"?"No alerts here":"Turn on alerts";
 }
 
 function fmtAge(iso){const m=(Date.now()-new Date(iso).getTime())/60000;if(m<1)return"just now";if(m<90)return Math.round(m)+" min ago";return(m/60).toFixed(1)+" h ago";}
@@ -163,19 +203,24 @@ function header(){
   upEl.append(old?pill("serious","Stale: "):"",data.updated_label+" ("+fmtAge(data.updated_iso)+")");
 }
 function setTheme(t){document.documentElement.setAttribute("data-theme",t);store.set("bt",t);}
+const cur_is_unread=(tabs,id)=>{const t=tabs.find(x=>x.id===id);return!!(t&&t.unread);};
 function render(){
   app.textContent="";
   upEl=h("span",{cls:"up"});
   const dark=()=>{const c=document.documentElement.getAttribute("data-theme");return c?c==="dark":matchMedia("(prefers-color-scheme:dark)").matches;};
   const wrap=h("div",{cls:"wrap"});
   wrap.append(h("header",{},h("h1",{text:data.title||"Board"}),upEl,h("span",{cls:"sp"}),
+    (()=>{const b=h("button",{cls:"btn",onclick:e=>setupAlerts(e.currentTarget)});paintAlert(b);return b;})(),
     h("button",{cls:"btn",text:"Theme",onclick:()=>setTheme(dark()?"light":"dark")}),
     h("button",{cls:"btn",text:"Lock",onclick:()=>{store.del("bk");pass=null;data=null;gate();}})));
   const tabs=data.tabs;
   if(!tab||!tabs.some(t=>t.id===tab))tab=(store.get("bv")&&tabs.some(t=>t.id===store.get("bv")))?store.get("bv"):tabs[0].id;
+  if(cur_is_unread(tabs,tab))markSeen();
+  const count=unread();
+  document.title=(count?"("+count+") ":"")+"Board";
   const nav=h("nav",{role:"tablist"});
   const body=h("div",{id:"body"});
-  for(const t of tabs)nav.append(h("button",{role:"tab","aria-selected":t.id===tab?"true":"false",text:t.label,onclick:()=>{tab=t.id;store.set("bv",tab);const y=0;render();scrollTo(0,y);}}));
+  for(const t of tabs)nav.append(h("button",{role:"tab","aria-selected":t.id===tab?"true":"false",text:t.label+(t.unread&&count?" ("+count+")":""),onclick:()=>{tab=t.id;store.set("bv",tab);const y=0;render();scrollTo(0,y);}}));
   wrap.append(nav,body);
   app.append(wrap);
   header();
@@ -193,6 +238,7 @@ function block(b){
       case"table":return tableBlock(b);
       case"feed":return h("div",{cls:"card"},b.title?h("h2",{text:b.title}):null,b.note?h("p",{cls:"note",text:b.note}):null,h("ul",{cls:"feed"},...b.items.map(i=>h("li",{},i.time?h("time",{text:i.time}):null,i.url?h("a",{href:i.url,target:"_blank",rel:"noopener noreferrer",text:i.text}):i.text))));
       case"cards":return cardsBlock(b);
+      case"events":return eventsBlock(b);
       case"dots":return chartCard(b,dots);
       case"time":return chartCard(b,timeChart);
       case"bars":return chartCard(b,bars);
@@ -200,6 +246,24 @@ function block(b){
     }
   }catch(e){return h("div",{cls:"card",text:"Could not draw this block."});}
   return h("div");
+}
+
+function eventsBlock(b){
+  const all=[...(data.events||[])].reverse(),list=h("ul",{cls:"feed"});
+  const ics={good:"good",warning:"warning",critical:"critical",info:"info"};
+  const paint=q=>{
+    list.textContent="";q=(q||"").toLowerCase();let n=0;
+    for(const e of all){
+      if(q&&!(e.kind+" "+e.text).toLowerCase().includes(q))continue;
+      if(b.limit&&n>=b.limit)break;
+      n++;
+      list.append(h("li",{},h("time",{text:e.time}),pill(ics[e.level]||"info",e.kind)," ",e.text));
+    }
+    if(!n)list.append(h("li",{text:"Nothing yet."}));
+  };
+  paint("");
+  return h("div",{cls:"card"},b.title?h("h2",{text:b.title}):null,b.note?h("p",{cls:"note",text:b.note}):null,
+    b.search?h("input",{cls:"srch",type:"search",placeholder:"Search updates","aria-label":"Search",oninput:e=>paint(e.target.value)}):null,list);
 }
 
 function tableEl(cols,rows,opt){
@@ -448,13 +512,14 @@ function md(text){
 
 (async()=>{
   const t=store.get("bt");if(t)document.documentElement.setAttribute("data-theme",t);
+  if("serviceWorker"in navigator&&"Notification"in window&&Notification.permission==="granted"){try{swReg=await navigator.serviceWorker.register("sw.js");}catch(e){}}
   const m=location.hash.match(/k=([^&]+)/);
   const fromHash=m?decodeURIComponent(m[1]):null;
   if(m)history.replaceState(null,"",location.pathname+location.search);
   const p=fromHash||store.get("bk");
   if(p){try{await unlock(p,true);}catch(e){store.del("bk");gate(fromHash?"That key does not open it.":"");}}
   else gate();
-  setInterval(refresh,120000);
+  setInterval(refresh,70000);
   setInterval(header,60000);
   document.addEventListener("visibilitychange",()=>{if(!document.hidden)refresh();});
 })();
